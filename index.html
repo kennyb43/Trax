@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trax</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-tile" viewBox="0 0 100 100" aria-hidden="true">
+        <rect x="2" y="2" width="96" height="96" rx="10" fill="#17171a"/>
+        <path d="M50 2 A48 48 0 0 1 2 50" fill="none" stroke="#f3efe6" stroke-width="18"/>
+        <path d="M50 98 A48 48 0 0 1 98 50" fill="none" stroke="#d4373a" stroke-width="18"/>
+      </svg>
+      <h1>Trax</h1>
+      <span class="game-label" id="gameLabel"></span>
+    </div>
+    <div class="top-actions">
+      <button class="btn" id="btnRules" title="How to play">Rules</button>
+      <button class="btn primary" id="btnNew">New game</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="board-wrap" id="boardWrap">
+      <div class="review-banner" id="reviewBanner" hidden>
+        <span id="reviewText"></span>
+        <button class="btn small" id="btnBackToGame">Back to game</button>
+      </div>
+      <div class="board-scroll" id="boardScroll">
+        <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+      <div class="hint" id="hint"></div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="card status-card">
+        <div class="players">
+          <div class="player" id="pWhite">
+            <span class="swatch white"></span>
+            <div><div class="pname">White</div><div class="prole" id="roleWhite"></div></div>
+          </div>
+          <div class="player" id="pRed">
+            <span class="swatch red"></span>
+            <div><div class="pname">Red</div><div class="prole" id="roleRed"></div></div>
+          </div>
+        </div>
+        <div class="status" id="status"></div>
+      </div>
+
+      <div class="card history-card">
+        <div class="card-head">
+          <h2>Moves</h2>
+          <div class="head-actions">
+            <button class="btn small" id="btnUndo" title="Take back your last move (Ctrl+Z)">Undo</button>
+            <button class="btn small" id="btnCopy" title="Copy the game record">Copy</button>
+            <button class="btn small" id="btnLoad" title="Paste a game record">Load…</button>
+          </div>
+        </div>
+        <div class="history" id="history"></div>
+      </div>
+
+      <div class="card options-card">
+        <h2>Options</h2>
+        <label class="opt">
+          <span>Placing tiles</span>
+          <select id="optControl">
+            <option value="arrows">Click cell, rotate with arrows, click tile to place</option>
+            <option value="rightclick">Left-click to cycle, right-click to place</option>
+          </select>
+        </label>
+        <label class="opt">
+          <span>Forced tiles</span>
+          <select id="optForced">
+            <option value="animated">Place one at a time</option>
+            <option value="instant">Place instantly</option>
+          </select>
+        </label>
+        <label class="opt check"><input type="checkbox" id="optSound" checked> Sound</label>
+        <label class="opt check"><input type="checkbox" id="optCoords" checked> Show coordinates</label>
+      </div>
+    </aside>
+  </main>
+
+  <!-- New game -->
+  <dialog id="dlgNew" class="dialog">
+    <form method="dialog" id="formNew">
+      <h2>New game</h2>
+      <fieldset>
+        <legend>Your colour</legend>
+        <div class="seg">
+          <label><input type="radio" name="color" value="0" checked><span><i class="swatch white"></i>White <small>moves first</small></span></label>
+          <label><input type="radio" name="color" value="1"><span><i class="swatch red"></i>Red</span></label>
+          <label><input type="radio" name="color" value="random"><span>Random</span></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Opponent</legend>
+        <div class="seg">
+          <label><input type="radio" name="level" value="easy"><span>Easy</span></label>
+          <label><input type="radio" name="level" value="medium" checked><span>Medium</span></label>
+          <label><input type="radio" name="level" value="hard"><span>Hard</span></label>
+          <label><input type="radio" name="level" value="expert"><span>Expert <small>threat search</small></span></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Rules</legend>
+        <div class="seg">
+          <label><input type="radio" name="variant" value="standard" checked><span>Standard <small>unlimited board</small></span></label>
+          <label><input type="radio" name="variant" value="limited"><span>8×8 <small>64 tiles</small></span></label>
+          <label><input type="radio" name="variant" value="loop"><span>Loop Trax <small>loops only</small></span></label>
+        </div>
+      </fieldset>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="start">Start</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Load game -->
+  <dialog id="dlgLoad" class="dialog">
+    <form method="dialog" id="formLoad">
+      <h2>Load a game</h2>
+      <p class="muted">Paste moves in standard notation (e.g. <code>@0/ B1+ B2\</code>). Move numbers and other text are ignored. The game continues with your current colour and opponent.</p>
+      <textarea id="loadText" rows="8" spellcheck="false"></textarea>
+      <label class="opt inline">
+        <span>Rules</span>
+        <select id="loadVariant">
+          <option value="standard">Standard</option>
+          <option value="limited">8×8</option>
+          <option value="loop">Loop Trax</option>
+        </select>
+      </label>
+      <p class="error" id="loadError"></p>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" id="btnLoadGo" value="load">Load</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Rules -->
+  <dialog id="dlgRules" class="dialog wide">
+    <form method="dialog">
+      <h2>How to play Trax</h2>
+      <ul class="rules">
+        <li>Every tile is the same: one side has crossing straight tracks, the other curved tracks. Each tile carries two red and two white track ends.</li>
+        <li>White moves first. On your turn place one tile next to the existing tiles so that every track it touches matches colour.</li>
+        <li><b>Forced plays:</b> if your tile leaves an empty space with two tracks of the same colour entering it, a tile is added there automatically to join them, as part of your turn. This can chain.</li>
+        <li>A move is illegal if it would leave a space with three tracks of the same colour entering it. Only legal placements are offered.</li>
+        <li><b>Win</b> by completing a <b>loop</b> of your colour, or a <b>line</b> of your colour running from one edge of the board to the opposite edge across at least 8 rows or columns. If one turn completes winning paths for both colours, the player who moved wins.</li>
+        <li><b>8×8:</b> the board may never exceed 8 tiles in either direction. <b>Loop Trax:</b> only loops win.</li>
+        <li>Moves are recorded as column, row and tile type: columns <code>@ A B C…</code> from the left, rows <code>0 1 2…</code> from the top, counted from the empty row and column just outside the tiles; <code>+</code> is a straight tile, <code>/</code> and <code>\</code> are curves.</li>
+      </ul>
+      <h3>Controls</h3>
+      <ul class="rules">
+        <li><b>Arrows mode:</b> click an empty space, use the ⟲ ⟳ buttons (or ← →) to cycle legal tiles, then click the tile (or press Enter) to place it. Esc cancels.</li>
+        <li><b>Right-click mode:</b> left-click a space to show a tile and keep left-clicking to cycle; right-click to place.</li>
+        <li>Click any move in the list to review that position. Ctrl+Z undoes your last move.</li>
+      </ul>
+      <div class="dialog-actions"><button class="btn primary" value="ok">Close</button></div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/engine.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/vendor/trax-analyst.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
