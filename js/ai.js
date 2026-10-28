@@ -24,6 +24,37 @@ function TraxAIModule(E) {
    * paths whose ends point away from each other (line threats).
    * Returns [white, red].
    */
+  /**
+   * Value of a path as a potential line. A line wins once it spans `lim` (8) rows or columns
+   * with both ends on opposite edges of the board. An *open* line – both ends already on the
+   * board's outer edges, pointing outward – is a countdown: at lim-1 its owner has two ways to
+   * finish (a double threat), at lim-2 the owner wins if it's their move, and even lim-3 is one
+   * quiet move from that. So the value climbs steeply as the gap closes. A line with only one
+   * end on the edge is worth much less (the other end must still be steered out), and one
+   * with neither end on the edge less again.
+   */
+  const OPEN2 = [0, 5000, 1500, 150, 30, 8];      // by gap = lim - span, both ends open
+  const OPEN1 = [0, 300, 100, 30, 8, 2];          // one end open
+  function lineValue(board, ends, sx, sy, lim) {
+    const ax = ends[0], ay = ends[1], ae = ends[2], bx = ends[3], by = ends[4], be = ends[5];
+    let s, open;
+    if ((ae === 1 && be === 3) || (ae === 3 && be === 1)) {
+      s = sx;
+      open = ((ae === 3 && ax === board.minX) || (ae === 1 && ax === board.maxX) ? 1 : 0) +
+             ((be === 3 && bx === board.minX) || (be === 1 && bx === board.maxX) ? 1 : 0);
+    } else if ((ae === 0 && be === 2) || (ae === 2 && be === 0)) {
+      s = sy;
+      open = ((ae === 0 && ay === board.minY) || (ae === 2 && ay === board.maxY) ? 1 : 0) +
+             ((be === 0 && by === board.minY) || (be === 2 && by === board.maxY) ? 1 : 0);
+    } else return 0;
+    if (s < 3) return 0;
+    const gap = lim - s;
+    if (gap <= 0) return OPEN2[1];
+    if (open === 2) return gap < OPEN2.length ? OPEN2[gap] : 0;
+    if (open === 1) return gap < OPEN1.length ? OPEN1[gap] : 0;
+    return (s - 2) * (s - 2) * (s >= lim - 2 ? 4 : 2);
+  }
+
   function pathValues(board) {
     const cells = board.cells;
     const visited = new Set();
@@ -58,15 +89,7 @@ function TraxAIModule(E) {
         const ae = ends[2], be = ends[5];
         const d = Math.abs(ends[0] + DX[ae] - ends[3] - DX[be]) + Math.abs(ends[1] + DY[ae] - ends[4] - DY[be]);
         let v = d < LOOP_W.length ? LOOP_W[d] : 0;
-        if (lines) {
-          if ((ae === 1 && be === 3) || (ae === 3 && be === 1)) {
-            const s = maxX - minX + 1;
-            if (s >= 3) v += (s - 2) * (s - 2) * (s >= lim - 2 ? 4 : 2);
-          } else if ((ae === 0 && be === 2) || (ae === 2 && be === 0)) {
-            const s = maxY - minY + 1;
-            if (s >= 3) v += (s - 2) * (s - 2) * (s >= lim - 2 ? 4 : 2);
-          }
-        }
+        if (lines) v += lineValue(board, ends, maxX - minX + 1, maxY - minY + 1, lim);
         out[c] += v;
       }
     }
@@ -319,10 +342,7 @@ function TraxAIModule(E) {
         const atEdge = (tx, ty, e) => (e === 3 && tx === minX) || (e === 1 && tx === maxX) || (e === 0 && ty === minY) || (e === 2 && ty === maxY);
         const edge = atEdge(ends[0], ends[1], ae) || atEdge(ends[3], ends[4], be);
         let v = d < LOOP_W.length ? LOOP_W[d] : 0;
-        if (lines) {
-          if (horiz && sx >= 3) v += (sx - 2) * (sx - 2) * (sx >= lim - 2 ? 4 : 2);
-          else if (vert && sy >= 3) v += (sy - 2) * (sy - 2) * (sy >= lim - 2 ? 4 : 2);
-        }
+        if (lines) v += lineValue(board, ends, sx, sy, lim);
         vals[c] += v;
         paths.push({ c, ax, ay, bx, by, d, sx, sy, horiz, vert, edge });
       }
@@ -706,6 +726,24 @@ function TraxAIModule(E) {
     }
   }
 
+  /** Re-check a claimed forced win starting with move m, allowing every possible defence. */
+  function confirmForcedWin(board, color, m, depth, deadline) {
+    const vx = new Expert(board, deadline);
+    vx.fullDefence = true;
+    const rec = board.apply(m[0], m[1], m[2]);
+    try {
+      const w = board.winFlags(rec.placed);
+      if (w[color]) return true;
+      if (w[1 - color]) return false;
+      const t = threats(board);
+      if (t[1 - color].length || !t[color].length) return false;
+      return vx.defended(color, t[color], depth);
+    } catch (e) {
+      if (e !== ABORT) throw e;
+      return false;                       // couldn't confirm in time
+    } finally { board.undo(rec); }
+  }
+
   /**
    * Expert move choice:
    *   1. take an immediate win, or if the opponent threatens one, consider only blocking moves;
@@ -744,7 +782,14 @@ function TraxAIModule(E) {
       for (let d = 1; d <= 10; d++) {
         const m = ex.tss(color, d);
         tssDepth = d;
-        if (m && allowed.has(mkey(m))) return { move: m, depth: d, score: WIN, note: 'forced win', nodes: ex.nodes };
+        if (m && allowed.has(mkey(m))) {
+          // The search above only tries defences near each threat; a defence far away can still
+          // work through a chain of forced plays. Confirm against every defence before trusting it.
+          if (confirmForcedWin(board, color, m, d, start + timeMs * 0.5)) {
+            return { move: m, depth: d, score: WIN, note: 'forced win', nodes: ex.nodes };
+          }
+          break;   // unconfirmed: let the normal search decide
+        }
       }
     } catch (e) { if (e !== ABORT) throw e; }
 
@@ -848,7 +893,7 @@ function TraxAIModule(E) {
   }
 
   const makeExpert = (board, deadline) => new Expert(board, deadline);
-  return { analystRerank, MATE, STATS, makeExpert, tssProbe, chooseMove, evaluate, pathValues, chooseExpert, analyzePaths, threats, scanWins, mayWin, winChecker };
+  return { lineValue, analystRerank, MATE, STATS, makeExpert, tssProbe, chooseMove, evaluate, pathValues, chooseExpert, analyzePaths, threats, scanWins, mayWin, winChecker };
 }
 
 if (typeof module !== 'undefined') module.exports = TraxAIModule;

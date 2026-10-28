@@ -32,8 +32,8 @@ The engine and AI are each wrapped in a single function so the page can ship the
 - **Hard** – iterative-deepening alpha-beta for about 3 seconds per move.
 - **Expert** – about 5 seconds per move, built around threats (moves that set up a win):
   1. takes any immediate win; if you threaten one, considers only moves that block it;
-  2. *threat-space search*: looks for a forced win by a sequence of threats, checking every defence at each step, so it follows attacks well beyond the normal search depth;
-  3. ranks the remaining moves with the same alpha-beta search as Hard;
+  2. *threat-space search*: looks for a forced win by a sequence of threats, so it follows attacks well beyond the normal search depth. For speed it only tries defences near each threat, so any win it finds is then re-checked against every possible defence (a block far away can work through forced plays) before Expert commits to it;
+  3. ranks the remaining moves with the same alpha-beta search as Hard. Its evaluation treats an *open line* (both ends on the board's outer edges, pointing outward) as a countdown – 7 long is a double threat, 6 is won for whoever moves next – so 5- and 4-long open lines already carry real weight and it won't extend yours (Hard shares this evaluation);
   4. *threat patterns*: re-ranks the top 20 using a catalogue of standard Trax threat shapes (corners, connectable pairs, L threats, caves, multi-stage attacks), so it builds its own threats and avoids leaving you yours – see *Third-party code* below;
   5. *safety check*: walks down that ranking and rejects any move that lets you start a forced attack.
 
