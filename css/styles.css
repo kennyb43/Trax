@@ -76,15 +76,26 @@ code { font-family: Consolas, "Cascadia Mono", monospace; background: #0003; pad
 .head-actions { display: flex; gap: 4px; }
 
 /* ---------- status ---------- */
-.players { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.players { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .player {
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 2px; padding: 7px 9px; border-radius: 8px; min-width: 0;
   border: 1px solid transparent; transition: border-color .2s, background .2s;
 }
 .player.active { border-color: var(--accent); background: #e8b23a14; }
 .player.winner { border-color: var(--ok); background: #6cc08b1f; }
-.pname { font-weight: 600; }
-.prole { font-size: 12px; color: var(--muted); }
+.pname { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.pinfo { min-width: 0; flex: 1; }
+.prole {
+  font-size: 12px; color: var(--muted); background: transparent; border: 1px solid transparent;
+  border-radius: 5px; padding: 1px 0; margin-left: -3px; width: calc(100% + 6px); cursor: pointer;
+}
+.prole:hover, .prole:focus { border-color: var(--line); background: var(--panel-2); color: var(--text); }
+.prole option { background: var(--panel-2); color: var(--text); }
+.status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.status-row .btn[hidden] { display: none; }
+.swap-row { display: flex; align-items: center; justify-content: space-between; margin: -4px 0 14px; }
+.swap-row .opt.check { margin: 0; font-size: 13px; color: var(--muted); }
+.dialog legend .swatch { width: 12px; height: 12px; vertical-align: -1px; margin-right: 2px; }
 .swatch { display: inline-block; width: 16px; height: 16px; border-radius: 50%; flex: none; border: 2px solid #0006; }
 .swatch.white { background: var(--white-track); }
 .swatch.red { background: var(--red-track); }

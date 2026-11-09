@@ -3,10 +3,12 @@
  * killer moves and a path-shape heuristic.
  * Like engine.js, everything lives in one function so it can be shipped to a Worker as source.
  *
- *   Easy   – takes a win if it sees one; otherwise half the time a random move,
- *            half the time the best move by a one-ply look.
- *   Medium – fixed two-ply search (its move + your reply).
- *   Hard   – iterative deepening until the time budget runs out.
+ *   Easy   – fixed two-ply search (its move + your reply).
+ *   Medium – iterative deepening until the time budget runs out.
+ *   Hard   – threat-based play (see chooseExpert): forced-win search, Medium's search,
+ *            threat-pattern re-ranking and a safety check against your attacks.
+ * (Before November 2026 these were called Medium, Hard and Expert, and there was a weaker
+ * Easy level that has been removed.)
  */
 function TraxAIModule(E) {
   'use strict';
@@ -235,11 +237,11 @@ function TraxAIModule(E) {
 
   /**
    * Choose a move for `color` on `board`.
-   * level: 'easy' | 'medium' | 'hard'.  timeMs: budget for hard.
+   * level: 'easy' | 'medium' | 'hard'.  timeMs: budget for medium and hard.
    * Returns {move:[x,y,t], depth, score, nodes}.
    */
   function chooseMove(board, color, level, timeMs = 3000, opts = {}) {
-    if (level === 'expert') {
+    if (level === 'hard') {
       const withAnalyst = opts.analyst && opts.notations
         ? { rerank: analystRerank(opts.analyst, opts.notations, board.variant), searchEnd: 0.45, searchStop: 0.25, rerankEnd: 0.75 }
         : {};
@@ -254,20 +256,15 @@ function TraxAIModule(E) {
     const win = ply1.find(s => s.score >= MATE);
     if (win) return { move: win.m, depth: 1, score: win.score };
 
-    if (level === 'easy') {
-      if (Math.random() < 0.5) return { move: moves[Math.floor(Math.random() * moves.length)], depth: 0, score: 0 };
-      return { move: pickBest(ply1, 6).m, depth: 1, score: 0 };
-    }
-
     ply1.sort((a, b) => b.score - a.score);
-    if (level === 'medium') {
+    if (level === 'easy') {
       const s = new Searcher(board, 0);
       const scored = s.root(color, ply1.map(x => x.m), 2);
       const best = pickBest(scored, 2);
       return { move: best.m, depth: 2, score: best.score, nodes: s.nodes };
     }
 
-    // Hard: iterative deepening; each pass reuses the transposition table and the previous ordering.
+    // Medium: iterative deepening; each pass reuses the transposition table and the previous ordering.
     const start = Date.now(), deadline = start + timeMs;
     const tt = new Map();
     let order = ply1, best = ply1[0], reached = 1, nodes = 0;
@@ -289,7 +286,7 @@ function TraxAIModule(E) {
   }
 
   // =====================================================================================
-  // Expert: threat-based play.
+  // Hard ("Expert" in the code): threat-based play.
   //
   // A "winning move" for colour c is a move that, played by c, completes a c loop or line.
   // A "threat" is having at least one. Expert:
@@ -820,8 +817,12 @@ function TraxAIModule(E) {
     const end = start + timeMs;
     const pool = order.filter(o => o.score > -MATE);
     if (!pool.length) return { move: order[0].m, depth: reached, score: order[0].score, note: 'lost' };
+    // Pick at random among the moves the search rates about as highly as the top-ranked one.
+    // This deliberately blends the search's judgement with the pattern re-ranking (letting the
+    // re-ranking alone decide played clearly worse in testing, 2–6). Attacks the re-ranking
+    // found gain too little are left out, unless one is the top-ranked move itself.
     const bestScore = pool[0].score;
-    const near = pool.filter(o => o.score >= bestScore - 0.5);
+    const near = pool.filter(o => o.score >= bestScore - 0.5 && (o === pool[0] || !o.weakAttack));
     const first = near[Math.floor(Math.random() * near.length)];
     const queue = [first].concat(pool.filter(o => o !== first));
     let chosen = null, checked = 0, rejected = 0;
@@ -841,42 +842,103 @@ function TraxAIModule(E) {
       rejected++;
     }
     if (!chosen) chosen = first;
-    return { move: chosen.m, depth: reached, tssDepth, score: chosen.score, checked, rejected, patterns: chosen.an !== undefined, note: rejected ? 'avoided attack' : 'search' };
+    return { move: chosen.m, depth: reached, tssDepth, score: chosen.score, checked, rejected, patterns: chosen.an !== undefined, an: chosen.an, attack: !!chosen.attack, gain: chosen.gain, note: rejected ? 'avoided attack' : 'search' };
   }
 
   /**
-   * Re-rank Expert's top candidates with the threat-pattern analysis from
-   * @slugbugblue/trax-analyst (Apache-2.0; bundled in js/vendor). For each candidate we build the
-   * resulting position in that library's engine and take its validated score for us; it knows
-   * the standard Trax threat shapes (corners, connectable pairs, L threats, caves, …) that our
-   * own evaluation doesn't. Decisive verdicts dominate; otherwise the score is blended with the
-   * search score. Weight AW = 60 won 14–4 over 18 games against Expert without it; a lighter
-   * weight (20) went 0–4 and a heavier one (150) 2–4.
+   * Re-rank Hard's best candidates with the threat-pattern analysis from
+   * @slugbugblue/trax-analyst (Apache-2.0; bundled in js/vendor). It knows the standard Trax
+   * threat shapes (corners, connectable pairs, L threats, caves, …) that our own evaluation
+   * doesn't.
+   *
+   * Quiet moves are scored by the library straight after the move (the opponent to move).
+   * Attacks – moves that threaten to win next turn – are not: the library counts an unanswered
+   * "win next move" at about 100,000 points, so almost any attack used to come out on top even
+   * though the opponent simply blocks it. Instead an attack is judged by what the exchange
+   * gains: our position after the opponent's best block, compared with our position now (both
+   * with us to move, so they are directly comparable). An attack must gain at least MARGIN
+   * points to rank above the best quiet move; otherwise it ranks below it.
    */
-  function analystRerank(Analyst, notations, variant, { K = 20, AW = 60 } = {}) {
+  function analystRerank(Analyst, notations, variant, { K = 20, AW = 60, BLOCKS = 4, MARGIN = 3 } = {}) {
     const rules = { standard: 'trax', loop: 'traxloop', limited: 'trax8' }[variant] || 'trax';
     const base = notations.join(' ');
+    const analyse = (moves, me) => {
+      const T = new Analyst.Trax(rules, (base + ' ' + moves.join(' ')).trim());
+      if (T.over) return T.winner === me ? Infinity : -Infinity;
+      const a = Analyst.analyze(T);
+      a.validateThreats();
+      return a.scores[me];
+    };
+
     return (order, board, color, deadline) => {
       const me = color === 0 ? 'w' : 'b';
+      const opp = 1 - color;
+      // Baseline for attacks: only meaningful when we are not already answering a threat.
+      let s0 = null;
+      if (!threats(board)[opp].length) { try { s0 = analyse([], me); } catch (e) { s0 = null; } }
+      if (!Number.isFinite(s0)) s0 = null;
+
       const top = order.filter(o => o.score > -MATE).slice(0, K);
-      const done = [];
+      const quiet = [], attacks = [];
       for (const o of top) {
         if (Date.now() > deadline) break;
-        let s1;
+        const mvName = board.notation(o.m[0], o.m[1], o.m[2]);
+        let attack = false, blocks = [];
+        const rec = board.apply(o.m[0], o.m[1], o.m[2]);
         try {
-          const T = new Analyst.Trax(rules, base + ' ' + board.notation(o.m[0], o.m[1], o.m[2]));
-          if (T.over) continue;
-          const a = Analyst.analyze(T);
-          a.validateThreats();
-          s1 = a.scores[me];
+          attack = s0 !== null && threats(board)[color].length > 0;
+          if (attack) {
+            const scored = [];
+            for (const r of board.candidateMoves()) {
+              const rr = board.apply(r[0], r[1], r[2]);
+              if (!rr) continue;
+              const w = board.winFlags(rr.placed);
+              if (!w[opp] && !w[color] && threats(board)[color].length === 0) scored.push([evaluate(board, opp), r]);
+              board.undo(rr);
+            }
+            scored.sort((x, y) => y[0] - x[0]);
+            blocks = scored.slice(0, BLOCKS).map(x => board.notation(x[1][0], x[1][1], x[1][2]));
+          }
+        } finally { board.undo(rec); }
+
+        try {
+          if (!attack) {
+            const s1 = analyse([mvName], me);
+            if (!Number.isFinite(s1)) continue;
+            o.an = s1; o.attack = false;
+            o.combined = (Math.abs(s1) >= 50000 ? Math.sign(s1) * 1e7 : s1 * AW) + o.score;
+            quiet.push(o);
+          } else if (!blocks.length) {
+            o.an = Infinity; o.attack = true; o.combined = 1e9;       // no defence: a winning attack
+            attacks.push(o);
+          } else {
+            let worst = Infinity;
+            for (const bn of blocks) {
+              if (Date.now() > deadline) break;
+              const v = analyse([mvName, bn], me);
+              if (v < worst) worst = v;
+            }
+            if (worst === Infinity) continue;                           // ran out of time
+            o.an = worst; o.attack = true; o.gain = worst === -Infinity ? -Infinity : worst - s0;
+            attacks.push(o);
+          }
         } catch (e) { continue; }
-        if (!Number.isFinite(s1)) continue;
-        o.an = s1;
-        o.combined = (Math.abs(s1) >= 50000 ? Math.sign(s1) * 1e7 : s1 * AW) + o.score;
-        done.push(o);
       }
+
+      let bestQuiet = -Infinity;
+      for (const o of quiet) if (o.combined > bestQuiet) bestQuiet = o.combined;
+      if (bestQuiet === -Infinity) bestQuiet = 0;
+      for (const o of attacks) {
+        if (o.combined === 1e9) continue;
+        // Spending a threat has a cost the pattern score doesn't see (it's gone once blocked),
+        // so an attack must gain at least MARGIN points – about three corners – to be preferred.
+        const net = o.gain - MARGIN;
+        o.weakAttack = !(net > 0);
+        o.combined = o.gain === -Infinity ? -1e9 : bestQuiet + (net > 0 ? net * AW : -1 + net * AW);
+      }
+      const done = quiet.concat(attacks);
       if (!done.length) return order;
-      done.sort((a, b) => b.combined - a.combined);
+      done.sort((x, y) => y.combined - x.combined);
       return done.concat(order.filter(o => !done.includes(o)));
     };
   }

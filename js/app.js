@@ -10,8 +10,11 @@
   const TRACK = ['#f3efe6', '#d4373a'];
   const TILE_BG = '#17171a';
   const OPTION_ORDER = [0, 1, 2, 4, 3, 5];        // cycle order for the ghost tile: straights, then curves clockwise
-  const LEVEL_NAME = { easy: 'Easy', medium: 'Medium', hard: 'Hard', expert: 'Expert' };
-  const THINK_MS = { hard: 3000, expert: 5000 };   // thinking budgets per move
+  const LEVEL_NAME = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
+  const LEVELS = ['easy', 'medium', 'hard'];
+  const THINK_MS = { medium: 3000, hard: 5000 };   // thinking budgets per move
+  // Levels were renumbered when the old Easy was dropped; map names saved by earlier versions.
+  const LEGACY_LEVEL = { easy: 'easy', medium: 'easy', hard: 'medium', expert: 'hard' };
   const MIN_THINK_MS = 450;                        // so the computer's reply doesn't feel instantaneous
   const FORCED_DELAY_MS = 170;
   const LBL = 46;                                  // coordinate gutter, in board units (a cell is 100)
@@ -20,16 +23,34 @@
   const svg = $('board');
 
   // ---------------------------------------------------------------- settings
-  const DEFAULTS = { control: 'arrows', forced: 'animated', sound: true, coords: true, color: '0', level: 'medium', variant: 'standard' };
-  const settings = Object.assign({}, DEFAULTS, load('trax.settings') || {});
+  const DEFAULTS = { control: 'arrows', forced: 'animated', sound: true, coords: true, white: 'human', red: 'medium',
+    randomColours: false, variant: 'standard', version: 2 };
+  const settings = Object.assign({}, DEFAULTS, migrateSettings(load('trax.settings')));
   function load(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
   function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ } }
   const saveSettings = () => save('trax.settings', settings);
 
+  // Settings from before players could be human or computer on either side.
+  function migrateSettings(old) {
+    if (!old) return {};
+    if (old.version >= 2) return old;
+    const out = Object.assign({}, old, { version: 2 });
+    const lvl = LEGACY_LEVEL[old.level] || 'medium';
+    if (old.color === '1') { out.white = lvl; out.red = 'human'; }
+    else { out.white = 'human'; out.red = lvl; }
+    out.randomColours = old.color === 'random';
+    delete out.color; delete out.level;
+    return out;
+  }
+
+  // A player spec is 'human' or a level name.
+  const isHuman = p => p === 'human';
+  const roleName = p => (isHuman(p) ? 'Human' : `CPU · ${LEVEL_NAME[p]}`);   // compact, for the sidebar selectors
+
   // ---------------------------------------------------------------- state
   let game = new E.Game('standard');
-  let human = WHITE;
-  let level = 'medium';
+  let players = ['human', 'medium'];   // [White, Red]
+  let paused = false;                  // computer moves held (only offered when a computer is playing)
   let view = null;              // null = live game; k = reviewing the position after k moves
   let reviewGame = null;
   let sel = null;               // {x, y, opts, idx}
@@ -68,10 +89,13 @@
   let localAnalyst = null;
   try { localAnalyst = typeof TraxAnalystModule === 'function' ? TraxAnalystModule() : null; } catch (e) { localAnalyst = null; }
 
+  // UI level -> search routine in ai.js.
+  const AI_LEVEL = { easy: 'easy', medium: 'medium', hard: 'hard' };
+
   function requestAIMove() {
     const id = ++aiToken;
     const msg = { id, variant: game.variant, tiles: game.board.tiles(), notations: game.moves.map(m => m.notation),
-      color: game.toMove, level, timeMs: THINK_MS[level] || 3000 };
+      color: game.toMove, level: AI_LEVEL[players[game.toMove]], timeMs: THINK_MS[players[game.toMove]] || 3000 };
     if (worker) worker.postMessage(msg);
     else setTimeout(() => {
       const b = new E.Board(msg.variant);
@@ -119,8 +143,10 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   function canInteract() {
-    return view === null && !busy && !game.result && game.toMove === human;
+    return view === null && !busy && !game.result && isHuman(players[game.toMove]);
   }
+  const humanCount = () => players.filter(isHuman).length;
+  const computerToMove = () => !game.result && !isHuman(players[game.toMove]);
 
   function legalMap() {
     if (legalCache) return legalCache;
@@ -365,11 +391,18 @@
     saveGame();
     if (game.result) {
       renderAll();
-      if (game.result.winner === human) TraxSound.win();
-      else if (game.result.winner >= 0) TraxSound.lose();
+      const w = game.result.winner;
+      // Lose sound only when exactly one human is playing and the computer won.
+      if (w >= 0 && humanCount() === 1 && !isHuman(players[w])) TraxSound.lose();
+      else if (w >= 0) TraxSound.win();
       return;
     }
-    if (game.toMove !== human) startAI();
+    maybeStartAI();
+  }
+
+  // Start the computer if it is its turn and nothing is holding it back.
+  function maybeStartAI() {
+    if (computerToMove() && !paused && !thinking && !busy && view === null) startAI();
     else renderAll();
   }
 
@@ -388,7 +421,7 @@
     lastAI = result;
     const wait = MIN_THINK_MS - (Date.now() - startAI.pending.started);
     if (wait > 0) await sleep(wait);
-    if (id !== aiToken) return;
+    if (id !== aiToken || !thinking) return;
     thinking = false;
     if (!result) { game.result = { winner: -1, kind: 'draw', cells: [] }; busy = false; renderAll(); return; }
     if (view !== null) { view = null; reviewGame = null; }
@@ -402,11 +435,23 @@
   // ---------------------------------------------------------------- game lifecycle
   function newGame(opts) {
     cancelAI();
-    human = opts.color;
-    level = opts.level;
+    players = opts.players.slice();
+    paused = false;
     game = new E.Game(opts.variant);
     resetView();
     afterMove();
+  }
+
+  // Change who plays a colour, mid-game or not.
+  function setPlayer(color, spec) {
+    if (players[color] === spec) return;
+    const wasThinkingForThis = thinking && game.toMove === color;
+    players[color] = spec;
+    if (wasThinkingForThis) { cancelAI(); busy = false; }     // restart with the new level / hand to the human
+    if (humanCount() > 0 && !computerToMove()) paused = false;
+    sel = null; hover = null;
+    saveGame();
+    maybeStartAI();
   }
 
   function resetView() {
@@ -415,29 +460,39 @@
     invalidate();
   }
 
+  // Can undo: with humans playing, back to before the last human move; computer only, one move.
+  function undoTarget() {
+    const n = game.moves.length;
+    if (!n) return -1;
+    if (humanCount() === 0) return n - 1;
+    for (let i = n - 1; i >= 0; i--) if (isHuman(players[i % 2])) return i;
+    return -1;
+  }
+
   function undo() {
-    const notes = game.moves.map(m => m.notation);
-    if (!notes.some((_, i) => i % 2 === human)) return;
+    const k = undoTarget();
+    if (k < 0) return;
     cancelAI();
-    let removedIdx;
-    do { notes.pop(); removedIdx = notes.length; } while (removedIdx % 2 !== human);
-    game = E.Game.replay(game.variant, notes).game;
+    if (humanCount() === 0) paused = true;    // otherwise the computer would just replay the move
+    game = E.Game.replay(game.variant, game.moves.slice(0, k).map(m => m.notation)).game;
     resetView();
     saveGame();
-    renderAll();
+    maybeStartAI();
   }
 
   function setView(k) {
     if (k !== null && k >= game.moves.length) k = null;
+    // Reviewing while the computer plays both sides: hold its moves until you return.
+    if (k !== null && humanCount() === 0 && !game.result && !paused) { cancelAI(); busy = false; paused = true; }
     view = k;
     sel = null; hover = null;
     reviewGame = k === null ? null : E.Game.replay(game.variant, game.moves.slice(0, k).map(m => m.notation)).game;
     if (reviewGame && k === game.moves.length) reviewGame.result = game.result;
-    renderAll();
+    if (k === null) maybeStartAI(); else renderAll();
   }
 
   function saveGame() {
-    save('trax.game', { variant: game.variant, human, level, moves: game.moves.map(m => m.notation), resigned: game.result && game.result.kind === 'resign' ? game.result : null });
+    save('trax.game', { version: 2, variant: game.variant, players, paused, moves: game.moves.map(m => m.notation) });
   }
 
   function restoreGame() {
@@ -445,7 +500,14 @@
     if (!s || !Array.isArray(s.moves)) return false;
     const r = E.Game.replay(s.variant || 'standard', s.moves);
     if (r.error) return false;
-    game = r.game; human = s.human === RED ? RED : WHITE; level = LEVEL_NAME[s.level] ? s.level : 'medium';
+    game = r.game;
+    if (s.version >= 2 && Array.isArray(s.players)) {
+      players = s.players.map(p => (isHuman(p) || LEVEL_NAME[p] ? p : 'medium'));
+      paused = !!s.paused;
+    } else {                                    // saved by an earlier version: one human vs one computer
+      const lvl = LEGACY_LEVEL[s.level] || 'medium';
+      players = s.human === RED ? [lvl, 'human'] : ['human', lvl];
+    }
     resetView();
     return true;
   }
@@ -453,8 +515,10 @@
   // ---------------------------------------------------------------- sidebar
   function renderStatus() {
     const res = game.result;
-    $('roleWhite').textContent = human === WHITE ? 'You' : `Computer · ${LEVEL_NAME[level]}`;
-    $('roleRed').textContent = human === RED ? 'You' : `Computer · ${LEVEL_NAME[level]}`;
+    for (const [c, id] of [[WHITE, 'roleWhite'], [RED, 'roleRed']]) {
+      const el = $(id);
+      if (el.value !== players[c]) el.value = players[c];
+    }
     $('pWhite').classList.toggle('active', !res && game.toMove === WHITE);
     $('pRed').classList.toggle('active', !res && game.toMove === RED);
     $('pWhite').classList.toggle('winner', !!res && res.winner === WHITE);
@@ -462,17 +526,23 @@
 
     const st = $('status');
     st.classList.toggle('result', !!res);
+    const humans = humanCount();
+    const toMove = game.toMove, name = COLOR_NAME[toMove];
     let msg, hint = '';
     if (res) {
       if (res.winner < 0) msg = 'Draw — no legal moves remain.';
       else {
-        const who = res.winner === human ? 'You win' : 'Computer wins';
-        msg = `${who} with a ${res.kind === 'loop' ? 'loop' : 'line'}! (${COLOR_NAME[res.winner]})`;
+        const how = `with a ${res.kind === 'loop' ? 'loop' : 'line'}`;
+        if (humans === 1) msg = `${isHuman(players[res.winner]) ? 'You win' : 'Computer wins'} ${how}! (${COLOR_NAME[res.winner]})`;
+        else msg = `${COLOR_NAME[res.winner]} wins ${how}!`;
       }
     } else if (thinking) {
-      msg = '<span class="spinner"></span> Computer is thinking…';
-    } else if (game.toMove === human) {
-      msg = game.moves.length === 0 ? 'Your move — place the first tile.' : 'Your move.';
+      msg = `<span class="spinner"></span> ${humans ? 'Computer' : name} is thinking…`;
+    } else if (paused && computerToMove()) {
+      msg = `Paused — ${name} (computer) to move.`;
+    } else if (isHuman(players[toMove])) {
+      const who = humans === 2 ? `${name} to move` : 'Your move';
+      msg = game.moves.length === 0 ? `${who} — place the first tile.` : `${who}.`;
       hint = settings.control === 'arrows'
         ? (sel ? 'Rotate with ⟲ ⟳ or ← →, then click the tile or press Enter' : 'Click an empty space to place a tile')
         : (sel ? 'Left-click to cycle tiles, right-click to place' : 'Left-click an empty space to choose a tile');
@@ -481,8 +551,13 @@
     st.innerHTML = msg;
     $('hint').textContent = view === null ? hint : '';
 
-    $('gameLabel').textContent = `${E.VARIANTS[game.variant].label} · you play ${COLOR_NAME[human]} vs ${LEVEL_NAME[level]}`;
-    $('btnUndo').disabled = !game.moves.some((_, i) => i % 2 === human) || (busy && !thinking);
+    const bp = $('btnPause');
+    bp.hidden = !(humans === 0 || paused) || !!res;
+    bp.textContent = paused ? 'Resume' : 'Pause';
+
+    const short = p => (isHuman(p) ? 'Human' : LEVEL_NAME[p]);
+    $('gameLabel').textContent = `${E.VARIANTS[game.variant].label} · White: ${short(players[WHITE])} · Red: ${short(players[RED])}`;
+    $('btnUndo').disabled = undoTarget() < 0 || (busy && !thinking);
 
     const rb = $('reviewBanner');
     rb.hidden = view === null;
@@ -497,8 +572,7 @@
     const ms = game.moves;
     if (!ms.length) { h.innerHTML = '<div class="empty">No moves yet.</div>'; return; }
     const cur = view === null ? ms.length : view;
-    const you = c => (c === human ? 'You' : 'CPU');
-    let s = `<table><thead><tr><th></th><th>White · ${you(WHITE)}</th><th>Red · ${you(RED)}</th></tr></thead><tbody>`;
+    let s = '<table><thead><tr><th></th><th>White</th><th>Red</th></tr></thead><tbody>';
     for (let i = 0; i < ms.length; i += 2) {
       s += `<tr><td class="num">${i / 2 + 1}.</td>`;
       for (const j of [i, i + 1]) {
@@ -530,8 +604,8 @@
   function gameRecord() {
     const lines = [
       `[Trax] ${E.VARIANTS[game.variant].label}`,
-      `[White] ${human === WHITE ? 'You' : 'Computer (' + LEVEL_NAME[level] + ')'}`,
-      `[Red] ${human === RED ? 'You' : 'Computer (' + LEVEL_NAME[level] + ')'}`,
+      `[White] ${isHuman(players[WHITE]) ? 'Human' : 'Computer (' + LEVEL_NAME[players[WHITE]] + ')'}`,
+      `[Red] ${isHuman(players[RED]) ? 'Human' : 'Computer (' + LEVEL_NAME[players[RED]] + ')'}`,
     ];
     if (game.result) lines.push(`[Result] ${game.result.winner < 0 ? 'Draw' : COLOR_NAME[game.result.winner] + ' wins (' + game.result.kind + ')'}`);
     lines.push('');
@@ -578,21 +652,39 @@
   // ---------------------------------------------------------------- dialogs & options
   function openNewDialog() {
     const f = $('formNew');
-    f.color.value = settings.color; f.level.value = settings.level; f.variant.value = settings.variant;
+    f.white.value = settings.white; f.red.value = settings.red; f.variant.value = settings.variant;
+    $('randomColours').checked = !!settings.randomColours;
     $('dlgNew').showModal();
   }
   $('btnNew').addEventListener('click', openNewDialog);
+  $('btnSwap').addEventListener('click', () => {
+    const f = $('formNew');
+    const w = f.white.value; f.white.value = f.red.value; f.red.value = w;
+  });
   $('dlgNew').addEventListener('close', () => {
     if ($('dlgNew').returnValue !== 'start') return;
     const f = $('formNew');
-    settings.color = f.color.value; settings.level = f.level.value; settings.variant = f.variant.value;
+    settings.white = f.white.value; settings.red = f.red.value; settings.variant = f.variant.value;
+    settings.randomColours = $('randomColours').checked;
     saveSettings();
-    const color = settings.color === 'random' ? (Math.random() < 0.5 ? WHITE : RED) : +settings.color;
-    newGame({ color, level: settings.level, variant: settings.variant });
+    let ps = [settings.white, settings.red];
+    if (settings.randomColours && Math.random() < 0.5) ps = [ps[1], ps[0]];
+    newGame({ players: ps, variant: settings.variant });
   });
   $('btnRules').addEventListener('click', () => $('dlgRules').showModal());
   $('btnBackToGame').addEventListener('click', () => setView(null));
   $('btnUndo').addEventListener('click', undo);
+  $('btnPause').addEventListener('click', () => {
+    if (paused) { paused = false; if (view !== null) { view = null; reviewGame = null; } maybeStartAI(); }
+    else { paused = true; if (thinking) { cancelAI(); busy = false; } saveGame(); renderAll(); }
+  });
+
+  // Player selectors beside White and Red.
+  for (const [c, id] of [[WHITE, 'roleWhite'], [RED, 'roleRed']]) {
+    const el = $(id);
+    el.innerHTML = ['human'].concat(LEVELS).map(p => `<option value="${p}">${roleName(p)}</option>`).join('');
+    el.addEventListener('change', () => setPlayer(c, el.value));
+  }
 
   const optControl = $('optControl'), optForced = $('optForced'), optSound = $('optSound'), optCoords = $('optCoords');
   optControl.value = settings.control; optForced.value = settings.forced;
@@ -607,17 +699,17 @@
   window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(renderBoard, 60); });
 
   // ---------------------------------------------------------------- start
+  saveSettings();                       // persists any migration of old settings
   if (restoreGame()) {
-    renderAll();
-    if (!game.result && game.toMove !== human) startAI();
+    maybeStartAI();
   } else {
-    human = settings.color === '1' ? RED : WHITE;
-    level = settings.level;
+    players = [settings.white, settings.red];
     game = new E.Game(settings.variant);
     renderAll();
     openNewDialog();
   }
 
   // Exposed for debugging / automated tests.
-  window.trax = { get lastAI() { return lastAI; }, get game() { return game; }, get human() { return human; }, get busy() { return busy; }, E };
+  window.trax = { get lastAI() { return lastAI; }, get game() { return game; }, get players() { return players; },
+    get human() { return players.findIndex(isHuman); }, get busy() { return busy; }, get paused() { return paused; }, E };
 })();

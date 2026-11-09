@@ -39,15 +39,18 @@
       <div class="card status-card">
         <div class="players">
           <div class="player" id="pWhite">
-            <span class="swatch white"></span>
-            <div><div class="pname">White</div><div class="prole" id="roleWhite"></div></div>
+            <div class="pname"><span class="swatch white"></span>White</div>
+            <select class="prole" id="roleWhite" title="Who plays White – Human or Computer (can be changed at any time)"></select>
           </div>
           <div class="player" id="pRed">
-            <span class="swatch red"></span>
-            <div><div class="pname">Red</div><div class="prole" id="roleRed"></div></div>
+            <div class="pname"><span class="swatch red"></span>Red</div>
+            <select class="prole" id="roleRed" title="Who plays Red – Human or Computer (can be changed at any time)"></select>
           </div>
         </div>
-        <div class="status" id="status"></div>
+        <div class="status-row">
+          <div class="status" id="status"></div>
+          <button class="btn small" id="btnPause" hidden>Pause</button>
+        </div>
       </div>
 
       <div class="card history-card">
@@ -89,22 +92,27 @@
     <form method="dialog" id="formNew">
       <h2>New game</h2>
       <fieldset>
-        <legend>Your colour</legend>
+        <legend><i class="swatch white"></i> White <small>moves first</small></legend>
         <div class="seg">
-          <label><input type="radio" name="color" value="0" checked><span><i class="swatch white"></i>White <small>moves first</small></span></label>
-          <label><input type="radio" name="color" value="1"><span><i class="swatch red"></i>Red</span></label>
-          <label><input type="radio" name="color" value="random"><span>Random</span></label>
+          <label><input type="radio" name="white" value="human" checked><span>Human</span></label>
+          <label><input type="radio" name="white" value="easy"><span>Easy</span></label>
+          <label><input type="radio" name="white" value="medium"><span>Medium</span></label>
+          <label><input type="radio" name="white" value="hard"><span>Hard</span></label>
         </div>
       </fieldset>
       <fieldset>
-        <legend>Opponent</legend>
+        <legend><i class="swatch red"></i> Red</legend>
         <div class="seg">
-          <label><input type="radio" name="level" value="easy"><span>Easy</span></label>
-          <label><input type="radio" name="level" value="medium" checked><span>Medium</span></label>
-          <label><input type="radio" name="level" value="hard"><span>Hard</span></label>
-          <label><input type="radio" name="level" value="expert"><span>Expert <small>threat search</small></span></label>
+          <label><input type="radio" name="red" value="human"><span>Human</span></label>
+          <label><input type="radio" name="red" value="easy"><span>Easy</span></label>
+          <label><input type="radio" name="red" value="medium" checked><span>Medium</span></label>
+          <label><input type="radio" name="red" value="hard"><span>Hard</span></label>
         </div>
       </fieldset>
+      <div class="swap-row">
+        <button type="button" class="btn small" id="btnSwap" title="Swap White and Red">⇅ Swap colours</button>
+        <label class="opt check"><input type="checkbox" id="randomColours"> Random colours</label>
+      </div>
       <fieldset>
         <legend>Rules</legend>
         <div class="seg">
@@ -124,7 +132,7 @@
   <dialog id="dlgLoad" class="dialog">
     <form method="dialog" id="formLoad">
       <h2>Load a game</h2>
-      <p class="muted">Paste moves in standard notation (e.g. <code>@0/ B1+ B2\</code>). Move numbers and other text are ignored. The game continues with your current colour and opponent.</p>
+      <p class="muted">Paste moves in standard notation (e.g. <code>@0/ B1+ B2\</code>). Move numbers and other text are ignored. The game continues with the current players.</p>
       <textarea id="loadText" rows="8" spellcheck="false"></textarea>
       <label class="opt inline">
         <span>Rules</span>
@@ -159,7 +167,8 @@
       <ul class="rules">
         <li><b>Arrows mode:</b> click an empty space, use the ⟲ ⟳ buttons (or ← →) to cycle legal tiles, then click the tile (or press Enter) to place it. Esc cancels.</li>
         <li><b>Right-click mode:</b> left-click a space to show a tile and keep left-clicking to cycle; right-click to place.</li>
-        <li>Click any move in the list to review that position. Ctrl+Z undoes your last move.</li>
+        <li>Click any move in the list to review that position. Ctrl+Z takes back the last move made by a human (and any computer reply after it).</li>
+        <li>Either colour can be played by a human or the computer, and you can change who plays each colour at any time with the selectors beside White and Red. When the computer plays both colours, use Pause to stop and study the position.</li>
       </ul>
       <div class="dialog-actions"><button class="btn primary" value="ok">Close</button></div>
     </form>
