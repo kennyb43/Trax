@@ -51,6 +51,10 @@
   let game = new E.Game('standard');
   let players = ['human', 'medium'];   // [White, Red]
   let paused = false;                  // computer moves held (only offered when a computer is playing)
+  // Lines of play: every continuation tried in this game. `game` is always lines[active];
+  // `from` is how many opening moves a line shares with the line it branched from.
+  let lines = [{ moves: [], from: 0 }];
+  let active = 0;
   let view = null;              // null = live game; k = reviewing the position after k moves
   let reviewGame = null;
   let sel = null;               // {x, y, opts, idx}
@@ -438,8 +442,86 @@
     players = opts.players.slice();
     paused = false;
     game = new E.Game(opts.variant);
+    lines = [{ moves: [], from: 0 }]; active = 0;
     resetView();
     afterMove();
+  }
+
+  // ---------------------------------------------------------------- lines of play
+  const notationsOf = g => g.moves.map(m => m.notation);
+  // "2. B0+" (White's 2nd move) / "2… C1+" (Red's): the position after `k` moves of `moves`.
+  const moveRef = (moves, k) => `${Math.ceil(k / 2)}${k % 2 ? '.' : '…'} ${moves[k - 1] || ''}`;
+  const isPrefix = (a, b) => a.length <= b.length && a.every((m, i) => m === b[i]);
+
+  // Drop lines that add nothing: any non-active line that is a prefix of (or equal to) another.
+  function pruneLines() {
+    lines[active].moves = notationsOf(game);
+    const keep = lines.filter((l, i) => i === active ||
+      !lines.some((o, j) => j !== i && isPrefix(l.moves, o.moves) && (o.moves.length > l.moves.length || j < i || j === active)));
+    active = keep.indexOf(lines[active]);
+    lines = keep;
+  }
+
+  // "Play from here": continue from the reviewed position, keeping the current line.
+  function playFromHere() {
+    if (view === null) return;
+    const k = view;
+    cancelAI();
+    lines[active].moves = notationsOf(game);
+    const prefix = lines[active].moves.slice(0, k);
+    // If another line already continues from exactly here and is just this prefix, reuse it.
+    let idx = lines.findIndex(l => l.moves.length === k && isPrefix(l.moves, prefix));
+    if (idx < 0) { lines.push({ moves: prefix, from: k }); idx = lines.length - 1; }
+    active = idx;
+    game = E.Game.replay(game.variant, prefix).game;
+    resetView();
+    pruneLines();
+    saveGame();
+    toast(k ? `New line after ${moveRef(prefix, k)} – the previous line is kept under Moves` : 'New line from the start – the previous line is kept under Moves');
+    maybeStartAI();
+  }
+
+  function switchLine(i) {
+    if (i === active || !lines[i]) return;
+    cancelAI();
+    lines[active].moves = notationsOf(game);
+    active = i;
+    game = E.Game.replay(game.variant, lines[i].moves).game;
+    resetView();
+    pruneLines();
+    if (humanCount() === 0) paused = true;      // don't let the computer run off with a line you just opened
+    saveGame();
+    maybeStartAI();
+  }
+
+  function dropLine() {
+    if (lines.length < 2) return;
+    cancelAI();
+    lines.splice(active, 1);
+    active = Math.min(active, lines.length - 1);
+    if (lines.length === 1) lines[0].from = 0;     // nothing left to branch from
+    game = E.Game.replay(game.variant, lines[active].moves).game;
+    resetView();
+    if (humanCount() === 0) paused = true;
+    saveGame();
+    maybeStartAI();
+  }
+
+  const lineResults = new Map();         // "variant|moves" -> result, so labels don't replay every redraw
+  function lineResult(l, i) {
+    if (i === active) return game.result;
+    const k = game.variant + '|' + l.moves.join(' ');
+    if (!lineResults.has(k)) lineResults.set(k, E.Game.replay(game.variant, l.moves).game.result);
+    return lineResults.get(k);
+  }
+
+  function lineLabel(l, i) {
+    const n = l.moves.length;
+    let tail = '';
+    const res = lineResult(l, i);
+    if (res) tail = res.winner < 0 ? ' · draw' : ` · ${COLOR_NAME[res.winner]} won`;
+    const from = l.from ? ` · after ${moveRef(l.moves, l.from)}` : ' · original';
+    return `Line ${i + 1}${from} · ${n} move${n === 1 ? '' : 's'}${tail}`;
   }
 
   // Change who plays a colour, mid-game or not.
@@ -492,7 +574,9 @@
   }
 
   function saveGame() {
-    save('trax.game', { version: 2, variant: game.variant, players, paused, moves: game.moves.map(m => m.notation) });
+    lines[active].moves = notationsOf(game);
+    save('trax.game', { version: 3, variant: game.variant, players, paused, moves: lines[active].moves,
+      lines: lines.map(l => ({ moves: l.moves, from: l.from })), active });
   }
 
   function restoreGame() {
@@ -507,6 +591,13 @@
     } else {                                    // saved by an earlier version: one human vs one computer
       const lvl = LEGACY_LEVEL[s.level] || 'medium';
       players = s.human === RED ? [lvl, 'human'] : ['human', lvl];
+    }
+    lines = [{ moves: notationsOf(game), from: 0 }]; active = 0;
+    if (s.version >= 3 && Array.isArray(s.lines) && s.lines[s.active]) {
+      const ok = s.lines.filter(l => Array.isArray(l.moves) && !E.Game.replay(game.variant, l.moves).error)
+        .map(l => ({ moves: l.moves.slice(), from: Math.max(0, Math.min(l.from | 0, l.moves.length)) }));
+      const a = ok.findIndex(l => l.moves.join(' ') === s.moves.join(' '));
+      if (a >= 0) { lines = ok; active = a; }
     }
     resetView();
     return true;
@@ -570,13 +661,16 @@
   function renderHistory() {
     const h = $('history');
     const ms = game.moves;
+    renderLines();
     if (!ms.length) { h.innerHTML = '<div class="empty">No moves yet.</div>'; return; }
+    const from = lines.length > 1 ? lines[active].from : 0;   // moves before this are shared with the parent line
     const cur = view === null ? ms.length : view;
     let s = '<table><thead><tr><th></th><th>White</th><th>Red</th></tr></thead><tbody>';
     for (let i = 0; i < ms.length; i += 2) {
-      s += `<tr><td class="num">${i / 2 + 1}.</td>`;
+      const branchRow = from > 0 && Math.floor(from / 2) === i / 2 && from % 2 === 0;
+      s += `<tr${branchRow ? ' class="branch-start" title="This line branches here"' : ''}><td class="num">${i / 2 + 1}.</td>`;
       for (const j of [i, i + 1]) {
-        if (j < ms.length) s += `<td class="mv${j + 1 === cur ? ' current' : ''}" data-k="${j + 1}" title="${ms[j].placed.length > 1 ? (ms[j].placed.length - 1) + ' forced tile(s)' : ''}">${escapeHtml(ms[j].notation)}</td>`;
+        if (j < ms.length) s += `<td class="mv${j + 1 === cur ? ' current' : ''}${j < from ? ' shared' : ''}" data-k="${j + 1}" title="${j < from ? 'Shared with the line this one branched from. ' : ''}${ms[j].placed.length > 1 ? (ms[j].placed.length - 1) + ' forced tile(s)' : ''}">${escapeHtml(ms[j].notation)}</td>`;
         else s += '<td></td>';
       }
       s += '</tr>';
@@ -584,6 +678,14 @@
     h.innerHTML = s + '</tbody></table>';
     const curEl = h.querySelector('.current');
     if (curEl) curEl.scrollIntoView({ block: 'nearest' });
+  }
+  function renderLines() {
+    const row = $('linesRow');
+    row.hidden = lines.length < 2;
+    if (lines.length < 2) return;
+    const sel = $('lineSelect');
+    sel.innerHTML = lines.map((l, i) => `<option value="${i}">${escapeHtml(lineLabel(l, i))}</option>`).join('');
+    sel.value = String(active);
   }
   const escapeHtml = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -602,16 +704,17 @@
 
   // ---------------------------------------------------------------- copy / load
   function gameRecord() {
-    const lines = [
+    const out = [
       `[Trax] ${E.VARIANTS[game.variant].label}`,
       `[White] ${isHuman(players[WHITE]) ? 'Human' : 'Computer (' + LEVEL_NAME[players[WHITE]] + ')'}`,
       `[Red] ${isHuman(players[RED]) ? 'Human' : 'Computer (' + LEVEL_NAME[players[RED]] + ')'}`,
     ];
-    if (game.result) lines.push(`[Result] ${game.result.winner < 0 ? 'Draw' : COLOR_NAME[game.result.winner] + ' wins (' + game.result.kind + ')'}`);
-    lines.push('');
+    if (lines.length > 1 && lines[active].from) out.push(`[Line] ${active + 1} of ${lines.length}, branched after move ${lines[active].from}`);
+    if (game.result) out.push(`[Result] ${game.result.winner < 0 ? 'Draw' : COLOR_NAME[game.result.winner] + ' wins (' + game.result.kind + ')'}`);
+    out.push('');
     const ms = game.moves;
-    for (let i = 0; i < ms.length; i += 2) lines.push(`${i / 2 + 1}. ${ms[i].notation}${ms[i + 1] ? ' ' + ms[i + 1].notation : ''}`);
-    return lines.join('\n');
+    for (let i = 0; i < ms.length; i += 2) out.push(`${i / 2 + 1}. ${ms[i].notation}${ms[i + 1] ? ' ' + ms[i + 1].notation : ''}`);
+    return out.join('\n');
   }
 
   $('btnCopy').addEventListener('click', async () => {
@@ -644,6 +747,7 @@
     }
     cancelAI();
     game = r.game;
+    lines = [{ moves: notationsOf(game), from: 0 }]; active = 0;
     resetView();
     toast(`Loaded ${tokens.length} moves`);
     afterMove();
@@ -673,6 +777,20 @@
   });
   $('btnRules').addEventListener('click', () => $('dlgRules').showModal());
   $('btnBackToGame').addEventListener('click', () => setView(null));
+  $('btnPlayHere').addEventListener('click', playFromHere);
+  $('lineSelect').addEventListener('change', e => switchLine(+e.target.value));
+  // Discarding a line takes two clicks: the first arms the button for a few seconds.
+  $('btnDropLine').addEventListener('click', () => {
+    const b = $('btnDropLine');
+    if (!b.classList.contains('confirm')) {
+      b.classList.add('confirm'); b.textContent = 'Discard?';
+      clearTimeout(b._t); b._t = setTimeout(() => { b.classList.remove('confirm'); b.textContent = '✕'; }, 3000);
+      return;
+    }
+    clearTimeout(b._t); b.classList.remove('confirm'); b.textContent = '✕';
+    dropLine();
+    toast('Line discarded');
+  });
   $('btnUndo').addEventListener('click', undo);
   $('btnPause').addEventListener('click', () => {
     if (paused) { paused = false; if (view !== null) { view = null; reviewGame = null; } maybeStartAI(); }
@@ -711,5 +829,5 @@
 
   // Exposed for debugging / automated tests.
   window.trax = { get lastAI() { return lastAI; }, get game() { return game; }, get players() { return players; },
-    get human() { return players.findIndex(isHuman); }, get busy() { return busy; }, get paused() { return paused; }, E };
+    get human() { return players.findIndex(isHuman); }, get lines() { return lines; }, get active() { return active; }, get busy() { return busy; }, get paused() { return paused; }, E };
 })();

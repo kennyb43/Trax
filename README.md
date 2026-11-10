@@ -11,6 +11,7 @@ Browser-based Trax for two humans, a human against the computer, or the computer
   - **Right-click mode**: left-click to show and cycle tiles, right-click to place.
 - Forced plays resolved automatically, either one at a time or instantly.
 - Move history in standard notation (forced tiles not listed). Click a move, or use ← → with nothing selected, to review earlier positions.
+- **Play from here**: while reviewing, continue the game from that position instead. The moves you leave behind are kept as a separate *line*, so nothing is lost and no confirmation is needed. A selector above the move list switches between lines (labelled with where each branched, its length and result); ✕ discards a line (click twice). A line you branch but never play into is folded away automatically. Lines are saved with the game; Copy exports the current line.
 - Undo (Ctrl+Z) takes back to before the last human move (one move when the computer plays both sides). Copy the game record, or load a pasted record.
 - Placement sound plus win/lose chimes (synthesised, no audio files), with a mute toggle.
 - The game in progress and your settings persist across reloads (browser localStorage).
